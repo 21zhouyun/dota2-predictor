@@ -6,6 +6,7 @@ import json
 import sys
 import urllib
 import os
+import time
 
 STEAM_BASE_URL = \
 	"https://api.steampowered.com/IDOTA2Match_570/GetMatchHistoryBySequenceNum/v0001/?key="
@@ -14,7 +15,9 @@ REQUESTS_STRING = "&matches_requested="
 MIN_DURATION = 1200
 
 # this should change every time a new patch is released
-STARTING_MATCH_SEQ_NUM = 2833500000
+STARTING_MATCH_SEQ_NUM_FILE = "seq_num.txt"
+
+NUM_GAME_LIMIT = 100000 * 100
 
 def valid(match_json):
 	""" checks if a game is valid: at least 20 mins long, all-pick ranked mode, no leavers
@@ -47,10 +50,20 @@ class SteamMiner(object):
 	"""
 
 	def __init__(self, number_of_games, out_file_handle, key):
-		self.games_number = number_of_games
+		# Steam api max 100000 game per day
+		self.games_number = min(number_of_games, NUM_GAME_LIMIT)
 		self.out_file = out_file_handle
 		self.api_key = key
-		self.seq_num = STARTING_MATCH_SEQ_NUM
+		self.seq_num = self.get_starting_match_sequence_number()
+
+	def get_starting_match_sequence_number(self):
+		with open("seq_num.txt", "r") as f:
+			num = int(f.readline())
+			return num
+
+	def save_sequence_number(self):
+		with open("seq_num.txt", "w") as f:
+			f.write(str(self.seq_num))
 
 	def get_url(self, matches_requested):
 		""" Concatenates the request into an URL
@@ -60,32 +73,35 @@ class SteamMiner(object):
 		return STEAM_BASE_URL + self.api_key + SEQ_STRING + str(self.seq_num) + \
 				REQUESTS_STRING + str(matches_requested)
 
-	def get_response(self, url_api):
-		""" Recursive method that tries getting a response from Steam until the response
-		is valid; The invalid response are probably caused by a rate limit that Steam has
-		which is not specified, so the request are sent continuously
-
+	def get_response(self, url_api, max_try=10):
+		"""
 		url_api -- the URL where the HTTP request is sent
 		games_json -- JSON with valid response
 		"""
 
-		response = urllib.urlopen(url_api)
+		for i in xrange(max_try):
+			response = urllib.urlopen(url_api)
 
-		try:
-			games_json = json.load(response)
-		except ValueError:
-			return self.get_response(url_api)
+			try:
+				games_json = json.load(response)
+			except ValueError:
+				print("Cannot parse response.")
+				time.sleep(60)
+				continue
 
-		if 'result' not in games_json:
-			return self.get_response(url_api)
+			if 'result' not in games_json:
+				print("Invalid json string.")
+				time.sleep(60)
+				continue
 
-		return games_json
+			return games_json
+		return None
 
 	def run(self):
 		""" Schedules the HTTP request, considering the fact that one request can handle
 		up to 100 matches requested, so the process is done in chunks
 		"""
-
+		print("Start mining: %s" % self.seq_num)
 		chunks = self.games_number / 100
 		remainder = self.games_number - chunks * 100
 
@@ -93,6 +109,9 @@ class SteamMiner(object):
 			url = self.get_url(remainder if i == chunks else 100)
 
 			response_json = self.get_response(url)
+
+			if not response_json:
+				break
 
 			for match in response_json['result']['matches']:
 				match_id = match['match_id']
@@ -102,11 +121,13 @@ class SteamMiner(object):
 
 			print("Processed %d games" % ((i + 1) * 100))
 
+		self.save_sequence_number()
+
 def main():
 	""" Main function """
 
 	try:
-		api_key = os.environ['API_KEY']
+		api_key = os.environ['STEAM_API_KEY']
 	except KeyError:
 		sys.exit("Please set API_KEY environment variable.")
 
@@ -114,7 +135,7 @@ def main():
 		sys.exit("Usage: %s <output_file> <number_of_games>" % sys.argv[0])
 
 	try:
-		out_file = open(sys.argv[1], "wt")
+		out_file = open(sys.argv[1], "at")
 	except IOError:
 		sys.exit("Invalid output file")
 
